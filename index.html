@@ -165,6 +165,13 @@
     a.pill:hover .go, a.pill:focus-visible .go { transform: translate(3px,-3px); opacity: 1; }
     a.pill:active { transform: translateY(0) scale(.96); box-shadow: 0 1px 6px rgba(var(--purple), .25); transition-duration: .1s; }
 
+    #gate {
+      position: fixed; inset: 0; z-index: 50; cursor: pointer;
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      background: rgba(5,3,10,.35);
+      transition: opacity .9s ease, backdrop-filter .9s ease, -webkit-backdrop-filter .9s ease;
+    }
+    #gate.gone { opacity: 0; pointer-events: none; backdrop-filter: blur(0); -webkit-backdrop-filter: blur(0); }
     .audio-notice {
       position: fixed; bottom: calc(22px + env(safe-area-inset-bottom, 0px)); z-index: 100;
       font-size: .75rem; letter-spacing: .08em; text-transform: lowercase;
@@ -189,6 +196,9 @@
     .ring circle { fill: none; stroke-width: 2; }
     .ring .rt { stroke: rgba(var(--purple), .2); }
     .ring .rp { stroke: rgba(216,180,254,.9); stroke-linecap: round; stroke-dasharray: 100; stroke-dashoffset: 100; transition: stroke-dashoffset .3s linear; }
+    .mp.loading .ring .rp { stroke-dasharray: 22 78; stroke-dashoffset: 0; transition: none;
+      animation: ringspin .9s linear infinite; transform-origin: 22px 22px; }
+    @keyframes ringspin { to { transform: rotate(360deg); } }
     .mp .pplay .ic { position: relative; width: 14px; height: 14px; fill: currentColor; stroke: none; }
     .mp .i-pause { display: none; }
     .mp.playing .i-play { display: none; } .mp.playing .i-pause { display: block; }
@@ -268,9 +278,10 @@
     </div>
   </div>
 
+  <div id="gate"></div>
   <div class="audio-notice" id="audioNotice">tap anywhere</div>
 
-  <audio id="bgAudio" preload="none"></audio>
+  <audio id="bgAudio" preload="auto"></audio>
 
   <script>
     const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -456,6 +467,26 @@
       setTimeout(() => { try { g.bus.disconnect(); } catch (e) {} }, 1200);
     }
 
+    // Loading state: spin the ring while the browser is still buffering
+    let loading = false;
+    function setLoading(v) { loading = v; player.classList.toggle('loading', v); }
+    audio.addEventListener('waiting', () => { if (playing) setLoading(true); });
+    audio.addEventListener('playing', () => setLoading(false));
+    audio.addEventListener('pause', () => setLoading(false));
+
+    // Start buffering a track before anyone presses play
+    function primeAudio() {
+      const t = TRACKS[idx];
+      if (t && t.src && !audio.getAttribute('src')) { audio.src = t.src[t.si || 0]; audio.load(); }
+    }
+    // Warm the browser cache with the next track so "next" starts faster
+    const prefetcher = new Audio(); prefetcher.preload = 'auto'; prefetcher.muted = true;
+    function prefetchNext() {
+      const n = TRACKS[(idx + 1) % TRACKS.length];
+      if (n && n.src && n !== TRACKS[idx]) { const u = n.src[n.si || 0]; if (prefetcher.getAttribute('src') !== u) prefetcher.src = u; }
+    }
+    audio.addEventListener('canplaythrough', prefetchNext);
+
     function sync() {
       player.classList.toggle('playing', playing); player.classList.toggle('muted', muted);
       pPlay.setAttribute('aria-label', playing ? 'pause' : 'play');
@@ -476,7 +507,7 @@
     }
     setInterval(progress, 250);
 
-    function stopCurrent() { audio.pause(); if (gen) { stopGen(gen); gen = null; } }
+    function stopCurrent() { setLoading(false); audio.pause(); if (gen) { stopGen(gen); gen = null; } }
     function playCurrent() {
       const t = TRACKS[idx];
       if (t.src) {
@@ -485,7 +516,8 @@
         if (audio.getAttribute('src') !== url) audio.src = url;
         audio.volume = 0.35; audio.muted = muted;
         // Load failures are handled once, in the 'error' listener (handling them here too skipped two tracks at once).
-        audio.play().catch(() => {});
+        if (audio.readyState < 3) setLoading(true);
+        audio.play().catch(() => setLoading(false));
       } else {
         ensureAudio(); actx.resume();
         if (!gen) gen = startGen(t.gen);
@@ -494,6 +526,7 @@
     }
     function pauseCurrent() {
       playing = false;
+      setLoading(false);
       if (TRACKS[idx].src) audio.pause(); else if (actx) actx.suspend();
       sync();
     }
@@ -523,15 +556,23 @@
       if (playing) go(idx + 1);
     });
     audio.addEventListener('ended', () => go(idx + 1));
-    setMeta(); sync();
+    setMeta(); sync(); primeAudio();
 
     function markStarted() {
       if (audioStarted) return;
       audioStarted = true;
       notice.style.opacity = '0';
       setTimeout(() => { if (!revealed) { notice.textContent = canHover ? 'double-click the name' : 'double-tap the name'; notice.style.opacity = '1'; } }, 600);
+
     }
     function startAudio() { if (audioStarted) return; markStarted(); playCurrent(); }
+    const gate = document.getElementById('gate');
+    gate.addEventListener('click', e => {
+      e.stopPropagation();
+      gate.classList.add('gone');
+      setTimeout(() => gate.remove(), 1000);
+      startAudio();
+    });
     const btn = (id, fn) => document.getElementById(id).addEventListener('click', e => { e.stopPropagation(); fn(); });
     btn('pPlay', () => { if (!audioStarted) { markStarted(); playCurrent(); } else if (playing) pauseCurrent(); else playCurrent(); });
     btn('pNext', () => { markStarted(); go(idx + 1); });
@@ -551,7 +592,6 @@
       e.stopPropagation();
       if (e.pointerType !== 'mouse') { setOpen(true); clearTimeout(openT); openT = setTimeout(() => setOpen(false), 4000); }
     });
-    document.body.addEventListener('click', startAudio);
 
     /* ---------- Elements & state ---------- */
     const canvas = document.getElementById('bg-canvas');
@@ -726,7 +766,6 @@
     }
     head.addEventListener('click', e => {
       e.stopPropagation();
-      startAudio();
       pulse();
       clicks++;
       clearTimeout(clickTimer);
